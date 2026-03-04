@@ -790,7 +790,7 @@ if __name__ == "__main__":
 
     receiver = WebhookReceiver(
         provider_secrets={
-            "stripe": "whsec_test_secret_123",
+            "stripe": "YOUR_STRIPE_WEBHOOK_SECRET",
             "plaid": "plaid_webhook_secret_456",
             "twilio": "twilio_auth_token_789",
             "kyc_provider": "kyc_secret_abc",
@@ -818,7 +818,7 @@ if __name__ == "__main__":
     timestamp = "1706900001"
     signed = f"{timestamp}.".encode() + stripe_payload
     sig = hmac.new(
-        b"whsec_test_secret_123", signed, hashlib.sha256
+        b"YOUR_STRIPE_WEBHOOK_SECRET", signed, hashlib.sha256
     ).hexdigest()
     stripe_sig = f"t={timestamp},v1={sig}"
 
