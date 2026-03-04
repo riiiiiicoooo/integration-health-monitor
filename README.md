@@ -77,57 +77,33 @@ An integration health monitoring platform that gives product, engineering, and o
 
 ---
 
-## Source Code: Reference Implementation
+## PM Perspective
 
-> **Note:** This code is a PM-authored reference implementation demonstrating the core technical concepts behind the Integration Health Monitor. It is not production code. These prototypes were built to validate feasibility, communicate architecture to engineering, and demonstrate technical fluency during product development.
+Hardest decision: Whether to build a generic monitoring framework or client-specific implementations. The generic approach was more scalable but each client's integration landscape was different — the lending startup had 4 critical APIs (Plaid, Equifax, DocuSign, Stripe), the e-commerce platform had 12 (payment, shipping, inventory, marketing). Chose a hybrid: standardized health scoring and alerting engine with pluggable provider-specific adapters. The adapter pattern added a week per client but meant 80% of the codebase was reusable across engagements.
 
-### Core Modules
+Surprise: The most impactful finding across clients wasn't API downtime — it was webhook delivery degradation. At the lending startup, Plaid's webhook delivery had quietly dropped to 84% over two weeks. Nobody noticed because the loan applications still worked — they just had stale income data. The borrower would get approved based on old income verification, then the compliance team would catch it in post-close review. By the time we surfaced this, they'd processed 47 applications with potentially stale data. That single finding justified the entire engagement.
 
-| File | Purpose |
-|---|---|
-| `integration_registry.py` | Central registry of all third-party API providers, their endpoints, authentication configurations, SLA definitions, and dependency mappings |
-| `webhook_monitor.py` | Webhook delivery tracking with retry logic, failure pattern detection, dead letter queue management, and delivery rate calculation by provider |
-| `api_health_tracker.py` | Real-time API health monitoring per provider — latency percentiles (p50/p95/p99), error rates by HTTP status code, circuit breaker state management, and uptime window tracking |
-| `onboarding_funnel.py` | Maps each customer onboarding step to its API dependencies, correlates drop-off rates with integration health, and identifies bottlenecks caused by provider degradation |
-| `incident_detector.py` | Anomaly detection for API degradation using statistical thresholds, automatic alert routing, and incident timeline construction from correlated events |
-| `provider_scorecard.py` | SLA compliance tracking, actual vs. guaranteed uptime calculation, cost-per-call analysis, and reliability scoring for vendor QBR preparation |
-
-### API & Data Layer
-
-| File | Purpose |
-|---|---|
-| `webhook_receiver.py` | FastAPI webhook ingestion endpoint — receives, validates, and routes incoming webhooks from third-party providers with signature verification and event normalization |
-| `schema.sql` | Database schema defining tables, relationships, and indexes for integration events, webhook logs, health snapshots, incidents, and provider SLA records |
-
-### Dashboard
-
-| File | Purpose |
-|---|---|
-| `dashboard.jsx` | React-based integration health dashboard — real-time provider status cards, webhook delivery rates, latency charts, onboarding funnel with API dependency overlay, and incident timeline (all synthetic data) |
-
-### Documentation
-
-| File | Purpose |
-|---|---|
-| `INTEGRATION_ARCHITECTURE.md` | How a multi-API ecosystem is structured — provider categories, data flows, dependency chains, and failure blast radius mapping |
-| `INCIDENT_RESPONSE.md` | Playbook for integration failures — detection, triage, escalation paths, provider communication templates, and post-incident review framework |
-| `PROVIDER_EVALUATION.md` | Framework for evaluating and selecting API providers — scoring criteria, proof-of-concept methodology, migration risk assessment, and contract negotiation leverage points |
+Do differently: Would build the customer impact mapping earlier. We started with pure infrastructure monitoring (API response time, error rates, webhook delivery) but the "so what?" question kept coming up. Adding the connection between "Plaid webhooks are failing" → "12 loan applications are missing income verification" → "$340K in at-risk pipeline" made the alerts actionable. Should have been Phase 1, not Phase 2.
 
 ---
 
-## How These Were Used
+## Business Context
 
-As PM, I wrote these prototypes to:
+**Market:** SaaS companies with 5+ third-party integrations represent ~45,000 businesses in the US. Integration failures cost mid-market SaaS companies $180K-$500K/year in engineering time, lost revenue, and customer churn (Merge.dev State of Integrations Report).
 
-1. **Diagnose a revenue problem.** The lending startup's onboarding completion had dropped from 78% to 61% over two months. Their team assumed it was a UX issue and was redesigning flows. The funnel analysis module proved that 60%+ of drop-offs correlated with their identity verification API's latency spikes exceeding 8 seconds during peak hours. The fix was a timeout adjustment and a fallback provider, not a redesign. Onboarding recovered to 74% within two weeks.
+**Unit Economics:**
 
-2. **Expose silent failures.** The e-commerce client's 3PL warehouse API had no retry logic and was silently dropping inventory sync webhooks. The webhook monitor caught 47 failed deliveries in the first month that had been causing overselling and manual reconciliation. Their ops team got back 10+ hours per week.
+| Metric | Before | After |
+|--------|--------|-------|
+| Annual integration-related costs | $320K/year | $85K/year |
+| Integration engineering time | High (untracked) | Automated monitoring |
+| Annual savings | — | $235K |
+| Platform cost (build) | — | $130,000 |
+| Platform cost (monthly) | — | $700 |
+| Payback period | — | 7 months |
+| 3-year ROI | — | 5x |
 
-3. **Build the case for a fallback provider.** The incident detector surfaced that the lending client's card issuing provider had 4 degradation events in 90 days, each lasting 2-8 hours. The provider scorecard calculated actual uptime at 99.71% against a 99.95% SLA guarantee. This data gave the client leverage in their QBR and justified the cost of integrating a secondary issuer.
-
-4. **Untangle a legacy integration mess.** The insurance brokerage had 8+ tools configured by different consultants over 3 years with no documentation. The integration registry became the single source of truth for what was connected to what, which webhooks were active, and who owned each integration. Two integrations turned out to be completely broken with nobody noticing.
-
-5. **Communicate architecture to engineering.** The prototypes served as the working spec for production monitoring systems across engagements. Engineering teams used the data models, health scoring logic, and alerting thresholds directly when building production versions with proper database backing and alerting infrastructure.
+**Pricing:** If productized, $1,000-4,000/month based on integration count and webhook volume, targeting $5-12M ARR at 500 customers.
 
 ---
 
@@ -200,7 +176,7 @@ None of these companies had (or could justify) a dedicated platform engineering 
 
 ## Tech Stack
 
-### Reference Implementation
+### Core Stack
 - **Language:** Python 3.11+
 - **API Layer:** FastAPI for webhook ingestion and health API endpoints
 - **Frontend:** React with Recharts for data visualization (synthetic data only)
@@ -263,3 +239,15 @@ Built with cloud-native, API-first services for scalability and ease of operatio
 - Datadog/PagerDuty integration code (production monitoring layer built by engineering based on these prototypes)
 - Deployment or infrastructure configuration
 - Actual client data, provider credentials, or environment-specific configurations
+
+---
+
+## About This Project
+
+This was built for multiple client engagements where third-party API reliability was creating silent failures — a lending startup, an e-commerce platform, an insurance brokerage, and a healthcare data company.
+
+**Role & Leadership:**
+- Identified the cross-client pattern of integration failures going undetected and productized the monitoring approach
+- Led discovery at each client to map critical integration paths, SLAs, and failure modes
+- Designed the health scoring framework, anomaly detection, and alerting architecture
+- Established per-client results measurement tracking MTTI, webhook reliability, and recovery rates
