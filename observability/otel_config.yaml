@@ -1,0 +1,125 @@
+# OpenTelemetry Collector Configuration
+# Integration Health Monitor - API health, provider metrics, alerts
+# Specialized for high-volume health check telemetry with filtering
+
+receivers:
+  # OTLP gRPC for application-generated spans
+  otlp/grpc:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+  # OTLP HTTP alternative transport
+  otlp/http:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Webhook receiver for provider health check updates
+  # Third-party integrations POST health status to /health-webhook
+  # Reduces latency: providers send directly without client request roundtrip
+  webhookreceiver:
+    endpoint: 0.0.0.0:8888
+    path: /health-webhook
+    logs_parse_from: attributes
+
+  # Prometheus scraping for self-reported metrics
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'integration-health-monitor'
+          scrape_interval: 30s
+          static_configs:
+            - targets: ['localhost:8000']
+
+processors:
+  # Memory limiter - prevent OOM from high volume health pings
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 1024
+    spike_limit_mib: 256
+
+  # Batch for efficiency with high-volume telemetry
+  batch:
+    send_batch_size: 200
+    timeout: 10s
+    send_batch_max_size: 2000
+
+  # Resource attributes for context
+  resource/health-monitor:
+    attributes:
+      add:
+        service.name: "integration-health-monitor"
+        service.namespace: "portfolio-integrations"
+        service.version: "1.0.0"
+        environment: "production"
+
+  # Filter processor to reduce volume of healthy pings
+  # Only export error-level or warning-level health statuses to reduce noise
+  # Healthy pings are still sampled (1 in 100) for baseline verification
+  filter/health_check:
+    metrics:
+      metric:
+        # Keep only non-healthy metrics, sample healthy ones
+        - 'attributes["health.status"] != "healthy"'
+        - 'attributes["health.status"] == "healthy" and (UnixNano % 100) == 0'
+      datapoint:
+        - 'attributes["api.response_status"] >= 400'
+
+  # Transform processor to extract provider metadata
+  # Parses provider_id, integration_type from attributes for correlation
+  transform/provider:
+    log_statements:
+      - context: log
+        statements:
+          - set(attributes["provider.extracted"], ParseJSON(body))
+    trace_statements:
+      - context: span
+        statements:
+          - set(attributes["provider.id"], attributes["provider_id"])
+          - set(attributes["integration.type"], attributes["integration_type"])
+
+exporters:
+  # OTLP to Grafana Cloud - traces and metrics
+  otlp/grafana:
+    endpoint: "tempo-blocks-prod-us-central-1.grafana.net:443"
+    headers:
+      Authorization: "Bearer ${GRAFANA_OTLP_TOKEN}"
+    compression: gzip
+
+  # Prometheus Remote Write for metrics
+  prometheusremotewrite/grafana:
+    endpoint: "https://prometheus-blocks-prod-us-central-1.grafana.net/api/prom/push"
+    headers:
+      Authorization: "Bearer ${GRAFANA_PROMETHEUS_TOKEN}"
+    compression: snappy
+
+  # Console exporter for development
+  logging:
+    loglevel: info
+    sampling_initial: 5
+    sampling_thereafter: 100
+
+  # Jaeger for local distributed tracing (optional)
+  # jaeger/local:
+  #   endpoint: "localhost:14250"
+
+extensions:
+  health_check:
+    endpoint: ":13133"
+
+service:
+  pipelines:
+    # Traces: health checks, webhook processing, alert evaluation
+    traces:
+      receivers: [otlp/grpc, otlp/http]
+      processors: [memory_limiter, batch, resource/health-monitor, transform/provider]
+      exporters: [otlp/grafana, logging]
+
+    # Metrics: API response times, health check status, error rates by provider
+    metrics:
+      receivers: [otlp/grpc, otlp/http, webhookreceiver, prometheus]
+      processors: [memory_limiter, batch, resource/health-monitor, filter/health_check, transform/provider]
+      exporters: [prometheusremotewrite/grafana, logging]
+
+  extensions: [health_check]
