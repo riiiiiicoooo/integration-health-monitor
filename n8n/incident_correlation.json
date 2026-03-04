@@ -1,0 +1,427 @@
+{
+  "name": "Incident Correlation & Escalation",
+  "nodes": [
+    {
+      "parameters": {
+        "event": "insert",
+        "table": "incidents"
+      },
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        250,
+        450
+      ],
+      "webhookId": "incident-correlation-trigger"
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "SELECT incident_id, provider_id, client_id, severity, status, affected_flows, blast_radius FROM incidents WHERE incident_id = '{{ $trigger.body.incident_id }}' LIMIT 1"
+      },
+      "name": "Get Incident Details",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        450,
+        450
+      ],
+      "credentials": {
+        "postgres": "supabase"
+      }
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT provider_id FROM incidents WHERE client_id = '{{ $node['Get Incident Details'][0].client_id }}' AND status IN ('detected', 'acknowledged') AND incident_id != '{{ $node['Get Incident Details'][0].incident_id }}' AND detected_at >= NOW() - INTERVAL '30 minutes' ORDER BY detected_at DESC"
+      },
+      "name": "Find Related Incidents",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        650,
+        450
+      ],
+      "credentials": {
+        "postgres": "supabase"
+      }
+    },
+    {
+      "parameters": {
+        "loopProperty": "[0]"
+      },
+      "name": "Loop Related Providers",
+      "type": "n8n-nodes-base.loop",
+      "typeVersion": 1,
+      "position": [
+        850,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "SELECT pf.fallback_provider_id FROM provider_fallbacks pf WHERE pf.provider_id = '{{ $node['Loop Related Providers'].json.body.provider_id }}' LIMIT 1"
+      },
+      "name": "Check Fallback Provider",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        450
+      ],
+      "credentials": {
+        "postgres": "supabase"
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "nodeOutputs": [
+              {
+                "outputName": "has_fallback",
+                "outputTrigger": "={{ $node['Check Fallback Provider'][0].fallback_provider_id != null }}"
+              },
+              {
+                "outputName": "no_fallback",
+                "outputTrigger": "={{ $node['Check Fallback Provider'][0].fallback_provider_id == null }}"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Fallback Available?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "incident_id",
+              "value": "={{ 'INC-' + Math.random().toString(36).substr(2, 9).toUpperCase() }}"
+            },
+            {
+              "name": "client_id",
+              "value": "={{ $node['Get Incident Details'][0].client_id }}"
+            },
+            {
+              "name": "provider_id",
+              "value": "={{ $node['Get Incident Details'][0].provider_id }}"
+            },
+            {
+              "name": "severity",
+              "value": "={{ $node['Get Incident Details'][0].severity }}"
+            },
+            {
+              "name": "affected_providers",
+              "value": "={{ [$node['Get Incident Details'][0].provider_id, ...$node['Find Related Incidents'].map(r => r.provider_id)] }}"
+            },
+            {
+              "name": "group_incident_id",
+              "value": "={{ 'INC-GROUP-' + Math.random().toString(36).substr(2, 9).toUpperCase() }}"
+            }
+          ]
+        }
+      },
+      "name": "Prepare Incident Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        1450,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "nodeOutputs": [
+              {
+                "outputName": "is_p0",
+                "outputTrigger": "={{ $node['Prepare Incident Data'].json.severity === 'p0' }}"
+              },
+              {
+                "outputName": "is_p1_p2",
+                "outputTrigger": "={{ ['p1', 'p2'].includes($node['Prepare Incident Data'].json.severity) }}"
+              },
+              {
+                "outputName": "is_p3",
+                "outputTrigger": "={{ $node['Prepare Incident Data'].json.severity === 'p3' }}"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Route by Severity",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1650,
+        350
+      ]
+    },
+    {
+      "parameters": {
+        "url": "{{ env.SLACK_WEBHOOK_URL }}",
+        "method": "POST",
+        "body": "=JSON.stringify({\"text\": \"🚨 CRITICAL P0 INCIDENT\", \"blocks\": [{\"type\": \"section\", \"text\": {\"type\": \"mrkdwn\", \"text\": \"*P0 Incident Detected*\\n_{{ $node['Get Incident Details'][0].incident_id }}_\\n\\nProvider: {{ $node['Get Incident Details'][0].provider_id }}\\nAffected Flows: {{ $node['Get Incident Details'][0].affected_flows.join(', ') }}\\n\\nImmediate Action Required - Contact on-call engineer\"}}, {\"type\": \"actions\", \"elements\": [{\"type\": \"button\", \"text\": {\"type\": \"plain_text\", \"text\": \"View in Dashboard\"}, \"url\": \"https://dashboard.yourapp.com/incidents/{{ $node['Get Incident Details'][0].incident_id }}\"}, {\"type\": \"button\", \"text\": {\"type\": \"plain_text\", \"text\": \"Acknowledge\"}, \"action_id\": \"acknowledge_incident\"}]}]})"
+      },
+      "name": "Slack P0 Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1850,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "url": "{{ env.SLACK_WEBHOOK_URL }}",
+        "method": "POST",
+        "body": "=JSON.stringify({\"text\": \"⚠️  MAJOR INCIDENT\", \"blocks\": [{\"type\": \"section\", \"text\": {\"type\": \"mrkdwn\", \"text\": \"*{{ $node['Prepare Incident Data'].json.severity }} Incident Detected*\\n_{{ $node['Get Incident Details'][0].incident_id }}_\\n\\nProvider: {{ $node['Get Incident Details'][0].provider_id }}\\nAffected Flows: {{ $node['Get Incident Details'][0].affected_flows.join(', ') }}\\n\\nFallback Available: YES\\nInitiating switchover...\"}}, {\"type\": \"actions\", \"elements\": [{\"type\": \"button\", \"text\": {\"type\": \"plain_text\", \"text\": \"View Details\"}, \"url\": \"https://dashboard.yourapp.com/incidents/{{ $node['Get Incident Details'][0].incident_id }}\"}]}]})"
+      },
+      "name": "Slack P1 Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1850,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "url": "{{ env.SLACK_WEBHOOK_URL }}",
+        "method": "POST",
+        "body": "=JSON.stringify({\"text\": \"ℹ️  MINOR ISSUE\", \"blocks\": [{\"type\": \"section\", \"text\": {\"type\": \"mrkdwn\", \"text\": \"*{{ $node['Prepare Incident Data'].json.severity }} Issue Detected*\\n_{{ $node['Get Incident Details'][0].incident_id }}_\\n\\nProvider: {{ $node['Get Incident Details'][0].provider_id }}\\n\\nMonitoring closely...\"}}, {\"type\": \"context\", \"elements\": [{\"type\": \"mrkdwn\", \"text\": \"Logged {{ now.toISO() }}\"}]}]})"
+      },
+      "name": "Slack P3 Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1850,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "sendEmail",
+        "to": "{{ env.ESCALATION_EMAIL }}",
+        "subject": "CRITICAL: Integration Incident - {{ $node['Get Incident Details'][0].provider_id }}",
+        "emailType": "text",
+        "textEmail": "A critical incident has been detected:\n\nIncident ID: {{ $node['Get Incident Details'][0].incident_id }}\nProvider: {{ $node['Get Incident Details'][0].provider_id }}\nSeverity: {{ $node['Prepare Incident Data'].json.severity }}\nAffected Flows: {{ $node['Get Incident Details'][0].affected_flows.join(', ') }}\nDetected: {{ now.toISO() }}\n\nCorrelated Incidents: {{ $node['Find Related Incidents'].length }}\n\nImmediate action required. View dashboard for details."
+      },
+      "name": "Send Escalation Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [
+        2050,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "SELECT fd.flow_name FROM flow_dependencies fd WHERE fd.client_id = '{{ $node['Get Incident Details'][0].client_id }}' AND fd.provider_id IN ({{ $node['Prepare Incident Data'].json.affected_providers.map(p => \"'\" + p + \"'\").join(',') }}) GROUP BY fd.flow_name"
+      },
+      "name": "Get Affected Flows",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        2050,
+        500
+      ],
+      "credentials": {
+        "postgres": "supabase"
+      }
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "update",
+        "table": "incidents",
+        "idField": "incident_id",
+        "id": "{{ $node['Get Incident Details'][0].incident_id }}",
+        "columns": "parent_incident_id,affected_flows,alert_channels,updated_at",
+        "values": "={{ $node['Prepare Incident Data'].json.group_incident_id }},{{ '{\"' + $node['Get Affected Flows'].map(f => f.flow_name).join('\",\"') + '\"}' }},{{ '{\"slack\",\"email\"}' }},{{ now.toISO() }}"
+      },
+      "name": "Update Incident",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        2250,
+        500
+      ],
+      "credentials": {
+        "postgres": "supabase"
+      }
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "insert",
+        "table": "incident_timeline",
+        "columns": "incident_id,event_text,event_at",
+        "values": "={{ $node['Get Incident Details'][0].incident_id }},Correlated with {{ $node['Find Related Incidents'].length }} related incidents. Root cause analysis initiated.,{{ now.toISO() }}"
+      },
+      "name": "Log Timeline Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        2250,
+        600
+      ],
+      "credentials": {
+        "postgres": "supabase"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Incident Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Incident Details": {
+      "main": [
+        [
+          {
+            "node": "Find Related Incidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Related Incidents": {
+      "main": [
+        [
+          {
+            "node": "Prepare Incident Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Incident Data": {
+      "main": [
+        [
+          {
+            "node": "Route by Severity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Severity": {
+      "main": [
+        [
+          {
+            "node": "Slack P0 Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack P1 Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack P3 Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack P0 Alert": {
+      "main": [
+        [
+          {
+            "node": "Send Escalation Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack P1 Alert": {
+      "main": [
+        [
+          {
+            "node": "Send Escalation Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack P3 Alert": {
+      "main": [
+        [
+          {
+            "node": "Send Escalation Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Escalation Email": {
+      "main": [
+        [
+          {
+            "node": "Get Affected Flows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Affected Flows": {
+      "main": [
+        [
+          {
+            "node": "Update Incident",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Incident": {
+      "main": [
+        [
+          {
+            "node": "Log Timeline Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

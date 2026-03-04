@@ -1,0 +1,497 @@
+{
+  "name": "Integration Health Check Loop",
+  "nodes": [
+    {
+      "parameters": {
+        "interval": [
+          {
+            "unit": "minutes",
+            "value": 5
+          }
+        ]
+      },
+      "name": "Cron",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        250,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "SELECT p.provider_id, p.name, p.blast_radius, p.client_id, pe.path, pe.method, pe.timeout_ms, pe.expected_latency_ms, pe.is_critical, cbc.error_threshold_pct, cbc.window_seconds FROM providers p JOIN provider_endpoints pe ON pe.provider_id = p.provider_id LEFT JOIN circuit_breaker_configs cbc ON cbc.provider_id = p.provider_id WHERE p.is_active = TRUE ORDER BY p.provider_id, pe.id"
+      },
+      "name": "Get Active Endpoints",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        450,
+        450
+      ],
+      "credentials": {
+        "postgres": "supabase"
+      }
+    },
+    {
+      "parameters": {
+        "loopProperty": "[0]"
+      },
+      "name": "Loop Endpoints",
+      "type": "n8n-nodes-base.loop",
+      "typeVersion": 1,
+      "position": [
+        650,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $node['Loop Endpoints'].json.body.base_url + $node['Loop Endpoints'].json.body.path }}",
+        "method": "={{ $node['Loop Endpoints'].json.body.method }}",
+        "timeout": "={{ $node['Loop Endpoints'].json.body.timeout_ms / 1000 }}",
+        "options": {}
+      },
+      "name": "HTTP Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        850,
+        450
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "provider_id",
+              "value": "={{ $node['Loop Endpoints'].json.body.provider_id }}"
+            },
+            {
+              "name": "client_id",
+              "value": "={{ $node['Loop Endpoints'].json.body.client_id }}"
+            },
+            {
+              "name": "endpoint",
+              "value": "={{ $node['Loop Endpoints'].json.body.base_url + $node['Loop Endpoints'].json.body.path }}"
+            },
+            {
+              "name": "method",
+              "value": "={{ $node['Loop Endpoints'].json.body.method }}"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ new Date().toISOString() }}"
+            },
+            {
+              "name": "response_status_code",
+              "value": "={{ $node['HTTP Request'].statusCode || 0 }}"
+            },
+            {
+              "name": "latency_ms",
+              "value": "={{ $execution.executionData.resultData.runData['HTTP Request'][0].data.executionTime || 0 }}"
+            },
+            {
+              "name": "success",
+              "value": "={{ $node['HTTP Request'].statusCode >= 200 && $node['HTTP Request'].statusCode < 300 }}"
+            },
+            {
+              "name": "error_category",
+              "value": "={{ $node['HTTP Request'].statusCode >= 500 ? 'server_error' : $node['HTTP Request'].statusCode >= 400 ? 'client_error' : $node['HTTP Request'].statusCode === 0 ? 'timeout' : null }}"
+            },
+            {
+              "name": "retry_attempt",
+              "value": "=0"
+            }
+          ]
+        }
+      },
+      "name": "Set Variables",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "insert",
+        "table": "api_call_events",
+        "columns": "provider_id,client_id,endpoint,method,timestamp,response_status_code,latency_ms,success,error_category,retry_attempt",
+        "values": "={{ $node['Set Variables'].json.provider_id }},{{ $node['Set Variables'].json.client_id }},{{ $node['Set Variables'].json.endpoint }},{{ $node['Set Variables'].json.method }},{{ $node['Set Variables'].json.timestamp }},{{ $node['Set Variables'].json.response_status_code }},{{ $node['Set Variables'].json.latency_ms }},{{ $node['Set Variables'].json.success }},{{ $node['Set Variables'].json.error_category }},{{ $node['Set Variables'].json.retry_attempt }}"
+      },
+      "name": "Log API Call",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        450
+      ],
+      "credentials": {
+        "postgres": "supabase"
+      }
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as failed_count, SUM(CASE WHEN error_category IS NOT NULL THEN 1 ELSE 0 END) as error_count, COUNT(*) as total FROM api_call_events WHERE provider_id = '{{ $node['Set Variables'].json.provider_id }}' AND client_id = '{{ $node['Set Variables'].json.client_id }}' AND timestamp >= NOW() - INTERVAL '{{ $node['Loop Endpoints'].json.body.window_seconds }} seconds'"
+      },
+      "name": "Get Error Rate",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        1450,
+        450
+      ],
+      "credentials": {
+        "postgres": "supabase"
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "error_pct",
+              "value": "={{ ($node['Get Error Rate'][0].failed_count / $node['Get Error Rate'][0].total) * 100 }}"
+            },
+            {
+              "name": "error_threshold",
+              "value": "={{ $node['Loop Endpoints'].json.body.error_threshold_pct }}"
+            },
+            {
+              "name": "is_anomaly",
+              "value": "={{ $node['Get Error Rate'][0].error_count > 0 && ($node['Get Error Rate'][0].failed_count / $node['Get Error Rate'][0].total) * 100 > $node['Loop Endpoints'].json.body.error_threshold_pct }}"
+            }
+          ]
+        }
+      },
+      "name": "Calculate Error Rate",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        1650,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "nodeOutputs": [
+              {
+                "outputName": "anomaly_detected",
+                "outputTrigger": "{{ $node['Calculate Error Rate'].json.is_anomaly === true }}"
+              },
+              {
+                "outputName": "normal",
+                "outputTrigger": "{{ $node['Calculate Error Rate'].json.is_anomaly === false }}"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Check Anomaly",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1850,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as consecutive_failures FROM (SELECT provider_id FROM api_call_events WHERE provider_id = '{{ $node['Set Variables'].json.provider_id }}' AND client_id = '{{ $node['Set Variables'].json.client_id }}' AND success = FALSE ORDER BY timestamp DESC LIMIT 5) t WHERE success = FALSE"
+      },
+      "name": "Check Consecutive Failures",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        1850,
+        250
+      ],
+      "credentials": {
+        "postgres": "supabase"
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "nodeOutputs": [
+              {
+                "outputName": "escalate",
+                "outputTrigger": "={{ $node['Check Consecutive Failures'][0].consecutive_failures >= 3 }}"
+              },
+              {
+                "outputName": "no_escalation",
+                "outputTrigger": "={{ $node['Check Consecutive Failures'][0].consecutive_failures < 3 }}"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Check Escalation Threshold",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2050,
+        250
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "update",
+        "table": "circuit_breaker_state",
+        "idField": "provider_id",
+        "id": "={{ $node['Set Variables'].json.provider_id }}",
+        "columns": "current_state,last_state_change,consecutive_failures,total_trips,updated_at",
+        "values": "open,{{ now.toISO() }},{{ $node['Check Consecutive Failures'][0].consecutive_failures }},{{ ($node['Check Consecutive Failures'][0].consecutive_failures + 1) }},{{ now.toISO() }}"
+      },
+      "name": "Trip Circuit Breaker",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        2250,
+        150
+      ],
+      "credentials": {
+        "postgres": "supabase"
+      }
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "insert",
+        "table": "incident_timeline",
+        "columns": "incident_id,event_text,event_at",
+        "values": "={{ 'INC-' + Math.random().toString(36).substr(2, 9).toUpperCase() }},Circuit breaker tripped for {{ $node['Set Variables'].json.provider_id }} after {{ $node['Check Consecutive Failures'][0].consecutive_failures }} consecutive failures,{{ now.toISO() }}"
+      },
+      "name": "Create Incident Timeline",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        2250,
+        350
+      ],
+      "credentials": {
+        "postgres": "supabase"
+      }
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "insert",
+        "table": "health_snapshots",
+        "columns": "provider_id,client_id,snapshot_at,window_seconds,latency_p50_ms,latency_p95_ms,latency_p99_ms,total_requests,successful_requests,failed_requests,error_rate_pct,circuit_state,health_status,requests_per_minute",
+        "values": "={{ $node['Set Variables'].json.provider_id }},{{ $node['Set Variables'].json.client_id }},{{ now.toISO() }},{{ $node['Loop Endpoints'].json.body.window_seconds }},{{ $node['Set Variables'].json.latency_ms }},{{ $node['Set Variables'].json.latency_ms }},{{ $node['Set Variables'].json.latency_ms }},1,{{ $node['Set Variables'].json.success ? 1 : 0 }},{{ $node['Set Variables'].json.success ? 0 : 1 }},{{ $node['Calculate Error Rate'].json.error_pct }},closed,{{ $node['Set Variables'].json.success ? 'healthy' : 'unhealthy' }},{{ (1 / ($node['Loop Endpoints'].json.body.window_seconds / 60)) }}"
+      },
+      "name": "Log Health Snapshot",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        2050,
+        450
+      ],
+      "credentials": {
+        "postgres": "supabase"
+      }
+    },
+    {
+      "parameters": {
+        "url": "{{ env.UPSTASH_REDIS_URL }}",
+        "authentication": "none",
+        "method": "POST",
+        "body": "=SET circuit_breaker:{{ $node['Set Variables'].json.provider_id }} open EX 3600"
+      },
+      "name": "Update Circuit Breaker Cache",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        2450,
+        150
+      ],
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Cron": {
+      "main": [
+        [
+          {
+            "node": "Get Active Endpoints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Active Endpoints": {
+      "main": [
+        [
+          {
+            "node": "Loop Endpoints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Endpoints": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Set Variables",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Variables": {
+      "main": [
+        [
+          {
+            "node": "Log API Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log API Call": {
+      "main": [
+        [
+          {
+            "node": "Get Error Rate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Error Rate": {
+      "main": [
+        [
+          {
+            "node": "Calculate Error Rate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Error Rate": {
+      "main": [
+        [
+          {
+            "node": "Check Anomaly",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Anomaly": {
+      "main": [
+        [
+          {
+            "node": "Check Consecutive Failures",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Health Snapshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Consecutive Failures": {
+      "main": [
+        [
+          {
+            "node": "Check Escalation Threshold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Escalation Threshold": {
+      "main": [
+        [
+          {
+            "node": "Trip Circuit Breaker",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Health Snapshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trip Circuit Breaker": {
+      "main": [
+        [
+          {
+            "node": "Update Circuit Breaker Cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Incident Timeline": {
+      "main": [
+        [
+          {
+            "node": "Update Circuit Breaker Cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Health Snapshot": {
+      "main": [
+        [
+          {
+            "node": "Create Incident Timeline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

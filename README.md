@@ -171,6 +171,7 @@ None of these companies had (or could justify) a dedicated platform engineering 
 
 ## Tech Stack
 
+### Reference Implementation
 - **Language:** Python 3.11+
 - **API Layer:** FastAPI for webhook ingestion and health API endpoints
 - **Frontend:** React with Recharts for data visualization (synthetic data only)
@@ -178,6 +179,52 @@ None of these companies had (or could justify) a dedicated platform engineering 
 - **Key Libraries:** `dataclasses`, `statistics`, `datetime`, `enum`, `pydantic`, `uvicorn`
 - **Production equivalent:** Datadog for metrics/alerting, PagerDuty for incident routing
 - **Integration patterns:** Webhook ingestion, REST API polling, circuit breaker, exponential backoff with jitter
+
+---
+
+## Modern Stack (Production Ready)
+
+Built with cloud-native, API-first services for scalability and ease of operations:
+
+### Data Layer
+- **Supabase PostgreSQL**: Multi-tenant database with RLS policies, realtime subscriptions, and audit trails
+- **Migrations**: `/supabase/migrations/001_initial_schema.sql` - Fully normalized schema with multi-tenant support (clients, users with roles, providers, events, incidents, funnel data, scorecards)
+
+### Automation & Workflows
+- **n8n**: Low-code workflow automation for health checks and incident escalation
+  - `n8n/health_check_loop.json`: Cron-based health checks every 5 minutes → log to Supabase → compare against baseline → detect anomalies → trip circuit breaker if threshold exceeded
+  - `n8n/incident_correlation.json`: Supabase webhook trigger for new incidents → correlate related signals → route by severity → notify Slack + send emails
+- **Trigger.dev**: Serverless job scheduling for batch operations
+  - `trigger-jobs/health_check_batch.ts`: Daily 2 AM - comprehensive health snapshot generation
+  - `trigger-jobs/scorecard_generation.ts`: Monthly 1st of month - SLA compliance, cost analysis, QBR data
+
+### Monitoring & Observability
+- **Grafana Dashboards** (JSON exports):
+  - `grafana/dashboards/provider_health.json`: Real-time latency percentiles, error rates by provider, circuit breaker timeline, webhook delivery rates, incident trends
+  - `grafana/dashboards/funnel_correlation.json`: Onboarding funnel completion with API dependency overlay, drop-off correlation analysis by cause, top failing providers
+- **Realtime Updates**: Supabase subscriptions for live health status and incident alerts
+
+### Notifications & Reports
+- **React Email Templates** (TSX):
+  - `emails/degradation_alert.tsx`: Incident detection alert with metrics, impact summary, severity-based action items, links to dashboard
+  - `emails/scorecard_report.tsx`: Monthly QBR report with uptime vs. SLA, incident counts, MTTR, cost analysis, renewal recommendations
+- **Channels**: Slack (severity-routed), Resend (email), PagerDuty (escalation)
+
+### Deployment & Configuration
+- **Vercel**: Serverless hosting for API webhooks and cron jobs
+  - `vercel.json`: Build configuration, cron triggers, function memory/timeout tuning
+- **Replit**: Local development environment
+  - `.replit` + `replit.nix`: Postgres, Node 18, Python 3.11, n8n, Grafana
+- **Environment**: `.env.example` - All configuration keys for local and production
+
+### Infrastructure
+- **Upstash Redis**: Circuit breaker state cache (fast recovery probe lookups)
+- **PostgreSQL 14+**: Full-text search on webhook payloads, JSONB columns for flexible event storage
+
+### API & Cache
+- **Caching**: Redis for circuit breaker state with 1-hour TTL
+- **Idempotency**: Health checks log with unique request IDs, workflows are re-triggerable
+- **Scalability**: Stateless functions, database-backed state, async job processing
 
 ---
 

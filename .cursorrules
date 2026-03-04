@@ -1,0 +1,66 @@
+# Cursor Rules for Integration Health Monitor
+
+## Project Overview
+Integration Health Monitor is a PM-built platform for monitoring third-party API integrations, webhook reliability, and their impact on customer experience. Modern stack with Supabase, n8n workflows, Trigger.dev jobs, Grafana dashboards, and Resend emails.
+
+## Architecture Context
+- **API Health Monitoring**: Real-time latency (p50/p95/p99), error rates, circuit breaker states
+- **Webhook Verification**: Signature validation, delivery tracking, dead letter queue, retry logic
+- **Anomaly Detection**: Statistical thresholds, consecutive failure tracking, SLA breach alerts
+- **Provider Scorecards**: Monthly QBR data - uptime vs. SLA, cost per call, reliability trends
+- **Incident Correlation**: Multi-signal anomalies → grouped incidents → Slack/email escalation
+- **Funnel Analysis**: Onboarding steps mapped to API dependencies, drop-off correlation with latency
+
+## Database Schema (Supabase PostgreSQL)
+Core tables: `providers`, `provider_endpoints`, `provider_slas`, `webhook_events`, `api_call_events`, `health_snapshots`, `circuit_breaker_state`, `incidents`, `funnel_sessions`, `funnel_step_events`, `uptime_records`, `webhook_reliability`, `latency_records`, `cost_records`
+
+## Row-Level Security (RLS) Policy
+- **multi-tenant support**: `clients` table with `client_id` in user profiles
+- **Operations team**: Role `ops` sees all monitoring data across all clients
+- **Provider vendors**: Role `provider` sees only their own scorecard data
+- **Client users**: Role `client` sees only their own integration data and incident alerts
+- **Realtime enabled**: Real-time health status updates via Supabase subscriptions
+
+## n8n Workflows
+1. **health_check_loop.json**: Cron every 5 min → hit each active integration endpoint → log response to Supabase → compare against baseline → if error_rate > threshold: increment consecutive_failures → if consecutive_failures >= limit: trip circuit breaker → update circuit_breaker_state in Upstash Redis
+2. **incident_correlation.json**: Supabase webhook (new incident) → query related failing integrations → group by root cause → detect cascade failures → notify Slack (severity-based channel) + Resend email → update incident.status
+
+## Jobs (Trigger.dev)
+1. **health_check_batch.ts**: Daily 2AM batch health check - all endpoints, generate health_snapshots
+2. **scorecard_generation.ts**: Monthly 1st of month - aggregate metrics, calculate compliance, send QBR email
+
+## Dashboards (Grafana)
+1. **provider_health.json**: Latency percentiles per provider, error rates by status code, circuit breaker state timeline, webhook delivery rate trends
+2. **funnel_correlation.json**: Onboarding funnel steps with API health overlay, drop-off % aligned with provider latency spikes
+
+## Email Templates (React Email)
+1. **degradation_alert.tsx**: API degradation detected - provider, metric, severity, affected flows, Slack link, action items
+2. **scorecard_report.tsx**: Monthly scorecard - uptime vs SLA, incidents, cost per call, reliability ranking, renewal recommendation
+
+## Configuration Files
+- `.env.example`: SUPABASE_URL, SUPABASE_ANON_KEY, N8N_WEBHOOK_URL, UPSTASH_REDIS_URL, RESEND_API_KEY, GRAFANA_API_KEY, SLACK_WEBHOOK_URL
+- `vercel.json`: Build overrides, serverless functions for webhook receivers, cron jobs
+- `replit.nix`: Supabase CLI, n8n, Grafana, Node 18
+
+## Code Style
+- TypeScript/JavaScript for n8n workflows and Trigger.dev jobs
+- SQL for Supabase migrations (PostgreSQL 14+)
+- React TSX for email templates
+- ESLint config: 2-space indents, semicolons required, strict null checks
+- Comments: Explain the "why" not the "what", especially for complex detection/correlation logic
+
+## Production Assumptions
+- All workflows are idempotent
+- Failed health checks log to Supabase with `status = 'error'`, not thrown as exceptions
+- Circuit breaker states persist in Upstash Redis with 1-hour TTL
+- Incidents are immutable except for status/timeline updates
+- SLA data is read-only after scorecard generation (audit trail)
+- Webhook signatures use HMAC-SHA256 or provider-specific algorithm
+
+## Constants & Thresholds
+- **Health degradation**: error_rate > 5% over 5-min window
+- **Unhealthy**: error_rate > 15% or latency_p95 > SLA max_response_time_ms
+- **Circuit breaker**: 3+ consecutive failures or error_rate > 25% → open state
+- **Recovery probe**: One successful request in half_open state → closed (reset failures)
+- **Incident escalation**: P0 (blast_radius p0 + error_rate > 10%) → immediate Slack/PagerDuty
+- **Webhook delivery baseline**: 98% for critical providers (webhook_configs.events_subscribed)

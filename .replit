@@ -1,0 +1,39 @@
+# Replit Configuration for Integration Health Monitor
+
+run = "npm run dev"
+
+[env]
+SUPABASE_URL = "https://your-project.supabase.co"
+SUPABASE_ANON_KEY = ""
+N8N_WEBHOOK_URL = "http://localhost:5678/webhook"
+UPSTASH_REDIS_URL = ""
+RESEND_API_KEY = ""
+GRAFANA_API_KEY = ""
+SLACK_WEBHOOK_URL = ""
+DATABASE_URL = "postgresql://postgres:password@localhost:5432/integration_health"
+
+[[ports]]
+port = 3000
+description = "Next.js frontend / API"
+
+[[ports]]
+port = 5432
+description = "PostgreSQL (Supabase local)"
+
+[[ports]]
+port = 5678
+description = "n8n"
+
+[[ports]]
+port = 8000
+description = "Grafana"
+
+[nix]
+channel = "unstable"
+
+[packager]
+language = "python3"
+
+[packager.features]
+packageSearch = true
+guessImports = true
