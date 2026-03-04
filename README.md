@@ -145,6 +145,35 @@ As PM, I wrote these prototypes to:
 
 ---
 
+## Engagement & Budget
+
+### Team & Timeline
+
+| Role | Allocation | Duration |
+|------|-----------|----------|
+| Lead PM (Jacob) | 15 hrs/week | 12 weeks |
+| Lead Developer (US) | 35 hrs/week | 12 weeks |
+| Offshore Developer(s) | 1 × 35 hrs/week | 12 weeks |
+| QA Engineer | 15 hrs/week | 12 weeks |
+
+**Timeline:** 12 weeks total across 3 phases
+- **Phase 1: Discovery & Design** (2 weeks) — Integration inventory audit, failure mode mapping, SLA requirements, alerting threshold design
+- **Phase 2: Core Build** (7 weeks) — Health check engine, webhook delivery tracker, anomaly detection pipeline, Grafana dashboards, alert routing
+- **Phase 3: Integration & Launch** (3 weeks) — Provider-specific connectors (Stripe, Salesforce, Plaid), incident response runbooks, ops team onboarding, monitoring calibration
+
+### Budget Summary
+
+| Category | Cost | Notes |
+|----------|------|-------|
+| PM & Strategy | $33,300 | Discovery, specs, stakeholder management |
+| Development (Lead + Offshore) | $89,460 | Core platform build |
+| AI/LLM Token Budget | $2,160/month | Claude Haiku for anomaly classification and incident summarization ~2M tokens/month |
+| Infrastructure | $4,560/month | Supabase Pro, Redis, n8n, Trigger.dev, Grafana, AWS compute, React Email/Resend, misc |
+| **Total Engagement** | **$130,000** | Fixed-price, phases billed at milestones |
+| **Ongoing Run Rate** | **$700/month** | Infrastructure + AI tokens + 2hrs support |
+
+---
+
 ## Client Context
 
 This platform was built across multiple consulting engagements where the core problem was the same: companies scaling their product through third-party APIs without the internal platform engineering resources to monitor what was actually happening.
