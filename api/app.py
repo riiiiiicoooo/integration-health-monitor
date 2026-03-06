@@ -6,6 +6,22 @@ webhook_monitor, incident_detector, onboarding_funnel, provider_scorecard)
 and exposes them through REST endpoints and WebSockets.
 
 This is the integration layer between backend logic and frontend dashboard.
+
+Production Notes (not implemented in this demo):
+- SSRF Prevention: Outbound health-check URLs must be validated against an
+  allowlist of known provider domains. Use urllib.parse to block private IPs
+  (10.x, 172.16.x, 169.254.x) and file:// schemes before issuing requests.
+- Webhook HMAC Verification: Each inbound webhook should carry an HMAC-SHA256
+  signature header (e.g., X-Webhook-Signature). Verify using the provider's
+  shared secret before processing. See webhook_monitor.py for integration point.
+- Credential Encryption: API keys and OAuth tokens stored for provider health
+  checks should be encrypted at rest using AWS KMS or HashiCorp Vault Transit
+  engine — never stored as plaintext in the database.
+- WebSocket Authentication: The /ws endpoints should validate a JWT bearer
+  token on the initial handshake before upgrading the connection. Use a
+  Depends() guard on the WebSocket route.
+- Rate Limiting: Health-check polling intervals should respect provider rate
+  limits. Implement per-provider adaptive back-off using circuit breaker state.
 """
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
