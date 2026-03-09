@@ -81,3 +81,113 @@ This document captures the key architectural decisions made during the design an
 - External configuration management (e.g., Consul, etcd). Considered viable for production but adds infrastructure dependency. The database-backed registry provides the same queryability with simpler operations.
 - Spreadsheet-based provider catalog. Rejected because it cannot be programmatically consumed by monitoring modules and drifts from reality quickly.
 **Consequences:** The registry became the foundation for all monitoring capabilities. The `audit_report()` method enables quarterly reviews that flag providers needing attention: missing fallbacks, overdue contract reviews, and stale health checks. Flow dependency mapping enables compound reliability calculations (e.g., five 99.9% providers in sequence yields 99.5% chain reliability). The trade-off is that every provider onboarding requires a complete registry entry, which adds upfront effort but prevents the "nobody knows what integrations we have" problem from recurring. The PostgreSQL schema mirrors the registry data model with referential integrity, indexes for common query patterns, and views for dashboard consumption.
+
+---
+
+## ADR-007: Rolling Baseline Anomaly Detection - Pivot from Fixed Thresholds (Pivot Story)
+
+**Status:** Accepted
+**Date:** 2024-04
+**Context - Initial Approach:** The monitoring system launched with a simple fixed-threshold alerting strategy: alert if any provider's error rate exceeded 5%. This approach was easy to reason about and quick to implement. However, real-world testing immediately exposed a critical flaw.
+
+**The Pivot - Problem Discovery:**
+Within the first week of monitoring across live integrations, the system generated 200+ alerts. The team investigated and found that the 5% threshold was fundamentally inappropriate for the provider landscape:
+- **Plaid** (bank linking) naturally ran at 0.2-0.8% error rate — solid provider.
+- **SendGrid** (email) averaged 2.1% errors due to legitimate bounces, spam filtering, and rate-limit rollovers—not a provider problem.
+- **Equifax** (credit bureau API) during peak onboarding hours saw 4.2% errors from timeout and circuit breaker behavior—normal peak-hour pattern.
+- **Stripe** (payments) had sub-0.1% errors but when it did spike to 2% over 30 seconds, it was often temporary network jitter.
+
+A single fixed threshold couldn't distinguish between a catastrophic outage and normal provider variance. Alert fatigue set in immediately, and critical incidents were buried in noise.
+
+**The Pivot - Solution Adopted:**
+Scrapped the fixed-threshold approach and implemented rolling baseline anomaly detection. Instead of alerting on absolute error rates, the system now:
+1. Computes a 24-hour rolling baseline for each provider independently
+2. Alerts when the current error rate exceeds 2x-3x the baseline (depending on blast radius classification)
+3. Requires anomalies to be sustained for 3-15 minutes (provider-dependent) to filter transient blips
+4. Auto-classifies each provider's normal variance and adapts thresholds accordingly
+
+**Result:** Alert volume dropped 94% (from 200+ daily to ~12 daily) in the first two weeks post-launch. Simultaneously, the system caught more *real* incidents because it was no longer drowning in false positives. When Plaid had an actual outage and error rate spiked from 0.6% to 18%, the system detected it immediately (30x the baseline). When Equifax temporarily hit 9% during a surge event (2.1x the baseline), it still triggered an alert but the on-call team could confirm it was within expected variance and close the incident without intervention.
+
+**Key Insight:** Providers don't fail at a universal threshold. They fail relative to their own normal behavior. The system's credibility with ops teams improved dramatically once alerts actually meant something.
+
+**Implementation Details:**
+- Baselines computed via `compute_rolling_baseline(provider_id, window_hours=24)` in the incident detector
+- Blast radius (P0/P1/P2/P3) determines anomaly multiplier and sustained-minutes window automatically via `ANOMALY_DETECTION_RULES`
+- Sustained-minutes logic prevents single-request failures from creating incidents
+- `detected_anomalies` table captures baseline, current value, and multiplier for postmortem analysis and tuning
+
+**Trade-offs:**
+The system now requires 3-15 minutes to detect a sustained degradation (depending on provider classification). In exchange, it gains:
+1. Dramatically reduced alert fatigue
+2. Provider-aware baselining (respects that Plaid ≠ SendGrid)
+3. Automatic tuning as provider behavior changes (baseline recalculates hourly)
+4. Better on-call experience (alerts are meaningful, not noise)
+
+---
+
+## ADR-008: PagerDuty for Incident Routing and Escalation
+
+**Status:** Accepted
+**Date:** 2024-05
+**Context:** As the platform matured, integration incidents were being detected reliably by the anomaly detector, but the routing and escalation logic was hardcoded Slack messages. When a P0 incident occurred (e.g., Stripe circuit breaker tripped), there was no way to know who was on-call, no automatic escalation if the incident wasn't acknowledged within 15 minutes, and no unified incident lifecycle tracking across the organization.
+
+**Decision:** Integrate PagerDuty as the incident routing and escalation layer. When the anomaly detector or circuit breaker triggers an alert:
+1. Create a PagerDuty incident with provider name, blast radius, anomaly details, and suggested remediation steps
+2. Route to the appropriate on-call schedule based on provider classification (P0 → Platform Team On-Call, P1 → Backend Team, P2 → Team Slack digest, P3 → daily summary email)
+3. Set escalation policy: if incident not acknowledged within 5 minutes, escalate to Engineering Manager; if not resolved within 15 minutes, escalate to VP Engineering
+4. Auto-populate incident timeline with anomaly events, circuit breaker state changes, and alert history from the system
+5. Track MTTI (mean time to investigation) and MTTR (mean time to recovery) for postmortem analysis and on-call performance metrics
+
+**Why PagerDuty:**
+- **Escalation Policies:** Complex routing rules (provider → team mapping) and automatic escalation prevent critical incidents from being missed
+- **On-Call Rotation:** One source of truth for who is responsible at any given time, eliminates "who should handle this?" questions during incidents
+- **Incident Lifecycle Management:** Captures acknowledge/resolve timeline, enables automated postmortem triggering, provides visibility into on-call burden metrics
+- **Context Injection:** API allows us to enrich incidents with real-time health data (error rate trend, affected provider, fallback status) directly in the PagerDuty incident detail view
+- **Integration Ecosystem:** Works with Slack, email, phone, SMS for multi-channel notification and acknowledges based on user availability
+
+**Alternatives Considered:**
+- Pure Slack-based incident routing. Rejected because it lacks escalation policies and incident lifecycle tracking (who acknowledged? when was it resolved?).
+- Custom incident management system. Rejected as out-of-scope engineering effort; PagerDuty is purpose-built for this use case.
+- VictorOps (now Splunk On-Call). Considered viable but PagerDuty had better API integration with our monitoring stack.
+
+**Consequences:** Incident response became systematized. The VP Engineering can now see on-call burden metrics and identify chronically over-paged providers. Postmortems automatically capture incident context. The trade-off is operational: PagerDuty licensing scales with on-call users and team size, and incident creation must be carefully filtered to avoid creating noise (which is why the rolling baseline anomaly detection is critical to prevent alert fatigue flowing into PagerDuty).
+
+---
+
+## ADR-009: ClickHouse for Time-Series Analytics on Historical Integration Health Data
+
+**Status:** Accepted
+**Date:** 2024-05
+**Context:** As the platform accumulated weeks of historical data (health check snapshots, incident logs, webhook delivery metrics), PostgreSQL queries for SLA compliance calculations, cost-per-call analysis, and provider ranking reports were becoming slow. A monthly QBR scorecard query that needed to aggregate 6 months of latency percentiles, error rates, and incident data across 12 providers took 45+ seconds on PostgreSQL with optimized indexes. The organization needed faster historical analytics to support vendor negotiations and quarterly business reviews.
+
+**Decision:** Introduce ClickHouse as a dedicated time-series analytics database alongside PostgreSQL. The data flow:
+1. PostgreSQL stores operational data (current incidents, live circuit breaker state, webhook configurations) — optimized for transactional consistency
+2. Trigger-based pipelines export cold health data (daily snapshots of latency/error rates, monthly incident summaries, webhook delivery trends) to ClickHouse every night
+3. Analytics queries (SLA trend analysis, cost-per-call, provider ranking, incident pattern detection) run against ClickHouse instead of PostgreSQL
+4. ClickHouse's columnar storage format enables 10x+ faster aggregation queries on large datasets
+
+Example performance improvement:
+- Query: "For each provider, compute p95 latency, error rate, webhook delivery rate, incident count, and uptime % for the last 6 months"
+- PostgreSQL (denormalized views): 45 seconds
+- ClickHouse (native columnar aggregation): 2-3 seconds
+
+**Why ClickHouse:**
+- **Columnar Storage:** Ideal for time-series data where you query specific metrics (latency, error rate) across many time periods. Compresses dramatically better than row-oriented storage.
+- **Aggregation Performance:** GROUP BY queries on millions of rows complete in milliseconds. Enables on-demand SLA compliance calculations without pre-aggregation.
+- **Cost:** Open-source, self-hosted ClickHouse is cheaper than Datadog or other SaaS analytics platforms. Cloud-hosted ClickHouse (via ClickHouse Cloud) is available for teams preferring managed service.
+- **Integration:** Ships with Grafana connector, enabling drill-down dashboards. API is HTTP-based (no special client required beyond basic query tool).
+- **Retention:** Natural time-series rotation — old partitions can be archived or deleted after SLA lookback period expires (e.g., keep 24 months for audits, delete beyond that).
+
+**Alternatives Considered:**
+- Datadog Metrics. Rejected because cost scales with cardinality (number of providers × number of metric types) and adds vendor lock-in.
+- BigQuery. Overkill for this scale and requires GCP infrastructure commitment.
+- TimescaleDB (PostgreSQL extension). Considered viable but ClickHouse's columnar format is more efficient for the analytics query patterns (wide aggregations vs. point queries).
+- Keep everything in PostgreSQL with materialized views. Rejected because refresh times would still be slow and the performance ceiling is hit.
+
+**Consequences:** Scorecard generation, SLA compliance reports, and provider ranking are now fast enough to run on-demand (< 5 second latency). Historical analytics dashboards in Grafana can render without timing out. The trade-off is operational complexity: maintaining two data stores requires careful pipeline design to ensure ClickHouse stays in sync with the source of truth (PostgreSQL). Column families and partition keys must be designed correctly to avoid slow inserts. Data deletion/retention policies must be defined to prevent unbounded storage growth. A nightly ETL job (n8n workflow) handles the synchronization.
+
+**Monitoring ClickHouse Health:**
+- Query latency on analytics dashboards (alert if > 10 seconds)
+- Storage growth rate (alert if > 10 GB/month)
+- Partition lag (alert if insert lag > 1 hour behind current time)
+- Replication lag (if using cluster setup)

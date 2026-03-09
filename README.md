@@ -182,8 +182,13 @@ None of these companies had (or could justify) a dedicated platform engineering 
 - **Frontend:** React with Recharts for data visualization (synthetic data only)
 - **Database:** PostgreSQL schema for event storage, health snapshots, and incident records
 - **Key Libraries:** `dataclasses`, `statistics`, `datetime`, `enum`, `pydantic`, `uvicorn`
-- **Production equivalent:** Datadog for metrics/alerting, PagerDuty for incident routing
 - **Integration patterns:** Webhook ingestion, REST API polling, circuit breaker, exponential backoff with jitter
+
+### Alerting & Incident Management
+- **PagerDuty:** Incident routing, escalation policies, on-call rotation management, and incident lifecycle tracking. Integrates with anomaly detection and circuit breaker state to route critical alerts through escalation channels based on provider blast radius.
+
+### Analytics & Historical Query
+- **ClickHouse:** Columnar time-series analytics database for high-performance historical queries on integration health metrics. Enables fast aggregation of latency percentiles, error rates, webhook delivery trends, and SLA compliance calculations across weeks/months of data (10x faster than PostgreSQL for analytics on large datasets).
 
 ---
 
@@ -208,12 +213,17 @@ Built with cloud-native, API-first services for scalability and ease of operatio
   - `grafana/dashboards/provider_health.json`: Real-time latency percentiles, error rates by provider, circuit breaker timeline, webhook delivery rates, incident trends
   - `grafana/dashboards/funnel_correlation.json`: Onboarding funnel completion with API dependency overlay, drop-off correlation analysis by cause, top failing providers
 - **Realtime Updates**: Supabase subscriptions for live health status and incident alerts
+- **ClickHouse Integration**: Historical analytics queries for SLA trend analysis, cost-per-call calculations, provider ranking reports, and multi-month incident pattern analysis
+
+### Incident Response & Escalation
+- **PagerDuty Integration**: Incident severity routing (P0/P1 to on-call engineering, P2 to team Slack, P3 to digest), escalation policies for sustained outages, incident timeline auto-population from detected anomalies, MTTI/MTTR calculations for postmortems
+- **Automated Escalation**: Circuit breaker OPEN state and anomaly severity automatically trigger PagerDuty incidents with provider context, blast radius classification, and suggested remediation steps
 
 ### Notifications & Reports
 - **React Email Templates** (TSX):
-  - `emails/degradation_alert.tsx`: Incident detection alert with metrics, impact summary, severity-based action items, links to dashboard
-  - `emails/scorecard_report.tsx`: Monthly QBR report with uptime vs. SLA, incident counts, MTTR, cost analysis, renewal recommendations
-- **Channels**: Slack (severity-routed), Resend (email), PagerDuty (escalation)
+  - `emails/degradation_alert.tsx`: Incident detection alert with metrics, impact summary, severity-based action items, links to dashboard, PagerDuty incident link
+  - `emails/scorecard_report.tsx`: Monthly QBR report with uptime vs. SLA, incident counts, MTTR, cost analysis (powered by ClickHouse historical aggregations), renewal recommendations
+- **Channels**: Slack (severity-routed), Resend (email), PagerDuty (escalation with on-call routing)
 
 ### Deployment & Configuration
 - **Vercel**: Serverless hosting for API webhooks and cron jobs
