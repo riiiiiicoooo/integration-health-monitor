@@ -28,6 +28,7 @@ import hashlib
 import hmac
 import json
 import logging
+from sqlalchemy.orm import Session
 
 # FastAPI imports — would be installed in production
 # from fastapi import FastAPI, Request, Response, HTTPException, Header
@@ -431,12 +432,12 @@ class WebhookReceiver:
         self,
         provider_secrets: dict[str, str],
         handlers: Optional[dict] = None,
+        session_factory: Optional[object] = None,
     ):
         self._verifier = SignatureVerifier(provider_secrets)
         self._normalizer = EventNormalizer()
         self._handlers = handlers or {}
-        self._processed_events: set[str] = set()  # For idempotency
-        self._event_log: list[NormalizedEvent] = []
+        self.session_factory = session_factory
         self._stats = {
             "total_received": 0,
             "signature_valid": 0,

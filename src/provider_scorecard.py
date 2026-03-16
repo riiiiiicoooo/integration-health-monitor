@@ -22,6 +22,11 @@ from enum import Enum
 from typing import Optional
 from collections import defaultdict
 import statistics
+from sqlalchemy.orm import Session
+from sqlalchemy import desc
+import logging
+
+logger = logging.getLogger("provider_scorecard")
 
 
 # ---------------------------------------------------------------------------
@@ -153,13 +158,9 @@ class ProviderScorecard:
     Scoring methodology is documented in PROVIDER_EVALUATION.md Section 5.2.
     """
 
-    def __init__(self):
+    def __init__(self, session_factory: Optional[object] = None):
+        self.session_factory = session_factory
         self._sla_configs: dict[str, ProviderSLAConfig] = {}
-        self._uptime_records: list[UptimeRecord] = []
-        self._incidents: list[IncidentRecord] = []
-        self._latency_records: list[LatencyRecord] = []
-        self._webhook_records: list[WebhookReliabilityRecord] = []
-        self._cost_records: list[CostRecord] = []
 
     # -- Configuration ------------------------------------------------------
 
@@ -171,19 +172,106 @@ class ProviderScorecard:
     # -- Data Ingestion -----------------------------------------------------
 
     def add_uptime_record(self, record: UptimeRecord) -> None:
-        self._uptime_records.append(record)
+        if self.session_factory:
+            try:
+                from db import UptimeRecordModel
+                session = self.session_factory()
+                db_record = UptimeRecordModel(
+                    provider_id=record.provider_id,
+                    period_start=record.period_start,
+                    period_end=record.period_end,
+                    total_minutes=record.total_minutes,
+                    available_minutes=record.available_minutes,
+                    downtime_minutes=record.downtime_minutes,
+                    incident_count=record.incident_count,
+                    uptime_pct=record.uptime_pct,
+                )
+                session.add(db_record)
+                session.commit()
+                session.close()
+            except Exception as e:
+                logger.error(f"Failed to add uptime record: {e}")
 
     def add_incident(self, record: IncidentRecord) -> None:
-        self._incidents.append(record)
+        if self.session_factory:
+            try:
+                from db import IncidentRecordModel
+                session = self.session_factory()
+                db_record = IncidentRecordModel(
+                    provider_id=record.provider_id,
+                    incident_id=record.incident_id,
+                    occurred_at=record.occurred_at,
+                    duration_minutes=record.duration_minutes,
+                    severity=record.severity,
+                    root_cause=record.root_cause,
+                    appeared_on_status_page=record.appeared_on_status_page,
+                    mttr_minutes=record.mttr_minutes,
+                )
+                session.add(db_record)
+                session.commit()
+                session.close()
+            except Exception as e:
+                logger.error(f"Failed to add incident record: {e}")
 
     def add_latency_record(self, record: LatencyRecord) -> None:
-        self._latency_records.append(record)
+        if self.session_factory:
+            try:
+                from db import LatencyRecordModel
+                session = self.session_factory()
+                db_record = LatencyRecordModel(
+                    provider_id=record.provider_id,
+                    period_start=record.period_start,
+                    period_end=record.period_end,
+                    p50_ms=record.p50_ms,
+                    p95_ms=record.p95_ms,
+                    p99_ms=record.p99_ms,
+                    sample_count=record.sample_count,
+                )
+                session.add(db_record)
+                session.commit()
+                session.close()
+            except Exception as e:
+                logger.error(f"Failed to add latency record: {e}")
 
     def add_webhook_record(self, record: WebhookReliabilityRecord) -> None:
-        self._webhook_records.append(record)
+        if self.session_factory:
+            try:
+                from db import WebhookReliabilityRecordModel
+                session = self.session_factory()
+                db_record = WebhookReliabilityRecordModel(
+                    provider_id=record.provider_id,
+                    period_start=record.period_start,
+                    period_end=record.period_end,
+                    expected_deliveries=record.expected_deliveries,
+                    actual_deliveries=record.actual_deliveries,
+                    delivery_rate_pct=record.delivery_rate_pct,
+                    avg_delivery_latency_ms=record.avg_delivery_latency_ms,
+                )
+                session.add(db_record)
+                session.commit()
+                session.close()
+            except Exception as e:
+                logger.error(f"Failed to add webhook record: {e}")
 
     def add_cost_record(self, record: CostRecord) -> None:
-        self._cost_records.append(record)
+        if self.session_factory:
+            try:
+                from db import CostRecordModel
+                session = self.session_factory()
+                db_record = CostRecordModel(
+                    provider_id=record.provider_id,
+                    period_start=record.period_start,
+                    period_end=record.period_end,
+                    total_cost=record.total_cost,
+                    total_api_calls=record.total_api_calls,
+                    successful_calls=record.successful_calls,
+                    failed_calls=record.failed_calls,
+                )
+                session.add(db_record)
+                session.commit()
+                session.close()
+            except Exception as e:
+                logger.error(f"Failed to add cost record: {e}")
 
     # -- SLA Compliance -----------------------------------------------------
 
@@ -197,11 +285,19 @@ class ProviderScorecard:
 
         cutoff = datetime.now() - timedelta(days=days)
 
-        # Uptime
-        uptime_records = [
-            r for r in self._uptime_records
-            if r.provider_id == provider_id and r.period_start >= cutoff
-        ]
+        # Uptime - Query from database if available
+        uptime_records = []
+        if self.session_factory:
+            try:
+                from db import UptimeRecordModel
+                session = self.session_factory()
+                uptime_records = session.query(UptimeRecordModel).filter(
+                    UptimeRecordModel.provider_id == provider_id,
+                    UptimeRecordModel.period_start >= cutoff
+                ).all()
+                session.close()
+            except Exception as e:
+                logger.error(f"Failed to query uptime records: {e}")
 
         if uptime_records:
             total_minutes = sum(r.total_minutes for r in uptime_records)

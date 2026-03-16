@@ -25,6 +25,11 @@ from enum import Enum
 from typing import Optional
 from collections import defaultdict
 import statistics
+from sqlalchemy.orm import Session
+from sqlalchemy import desc
+import logging
+
+logger = logging.getLogger("incident_detector")
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +178,8 @@ class IncidentDetector:
     pre-computed metric readings and demonstrates the detection logic.
     """
 
-    def __init__(self):
-        self._readings: list[AnomalyReading] = []
-        self._incidents: list[Incident] = []
+    def __init__(self, session_factory: Optional[object] = None):
+        self.session_factory = session_factory
         self._rules: dict[str, list[DetectionRule]] = {}   # provider_id -> rules
         self._provider_blast_radius: dict[str, str] = {}    # provider_id -> blast_radius
         self._provider_names: dict[str, str] = {}           # provider_id -> display_name

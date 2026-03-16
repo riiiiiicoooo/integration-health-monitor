@@ -33,7 +33,7 @@ import logging
 
 # Import backend modules
 import sys
-sys.path.insert(0, '/sessions/youthful-eager-lamport/mnt/Portfolio/integration-health-monitor/src')
+sys.path.insert(0, '/sessions/gracious-tender-fermat/mnt/Portfolio/integration-health-monitor/src')
 
 from integration_registry import build_lending_client_registry, CircuitState
 from api_health_tracker import APIHealthTracker, APICallEvent, CircuitBreakerConfig
@@ -41,6 +41,7 @@ from webhook_monitor import WebhookMonitor, WebhookEvent, WebhookStatus
 from incident_detector import IncidentDetector, DetectionRule, AnomalyType, Incident
 from onboarding_funnel import OnboardingFunnel, FunnelStep, StepEvent, StepOutcome
 from provider_scorecard import ProviderScorecard, ProviderSLAConfig
+from db import init_database, init_redis
 
 from .models import (
     IntegrationListResponse, IntegrationStatus, IntegrationHealth, LatencyMetrics,
@@ -72,13 +73,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize backend systems
+# Initialize database with connection pooling
+try:
+    SessionLocal = init_database()
+    redis_client = init_redis()
+    logger.info("Database and Redis initialized successfully")
+except Exception as e:
+    logger.warning(f"Database initialization failed: {e}. Continuing with limited functionality.")
+    SessionLocal = None
+    redis_client = None
+
+# Initialize backend systems with database session factory
 registry = build_lending_client_registry()
-health_tracker = APIHealthTracker()
-webhook_monitor = WebhookMonitor()
-incident_detector = IncidentDetector()
+health_tracker = APIHealthTracker(session_factory=SessionLocal)
+webhook_monitor = WebhookMonitor(session_factory=SessionLocal, redis_client=redis_client)
+incident_detector = IncidentDetector(session_factory=SessionLocal)
 funnel_analyzer = OnboardingFunnel()
-scorecard_system = ProviderScorecard()
+scorecard_system = ProviderScorecard(session_factory=SessionLocal)
 
 # Configure health tracker circuit breakers from registry
 for provider in registry.list_all():
@@ -115,12 +126,22 @@ for provider in registry.list_all():
 # ---------------------------------------------------------------------------
 
 @app.get("/integrations", response_model=IntegrationListResponse, tags=["Health"])
-async def list_integrations():
-    """List all monitored integrations with current health status."""
+async def list_integrations(
+    limit: int = Query(50, ge=1, le=500, description="Maximum integrations to return"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+):
+    """List all monitored integrations with current health status.
+
+    Supports pagination with limit and offset parameters.
+    """
     providers = registry.list_all()
 
+    # Apply pagination
+    total_providers = len(providers)
+    providers_paginated = providers[offset:offset + limit]
+
     statuses = []
-    for provider in providers:
+    for provider in providers_paginated:
         snapshot = health_tracker.take_snapshot(provider.id, window_seconds=300)
         cb = health_tracker.get_circuit_state(provider.id)
 
@@ -141,7 +162,7 @@ async def list_integrations():
 
     return IntegrationListResponse(
         timestamp=datetime.now(),
-        total_integrations=len(providers),
+        total_integrations=total_providers,
         healthy=healthy,
         degraded=degraded,
         unhealthy=unhealthy,
@@ -257,9 +278,16 @@ async def receive_webhook(provider_id: str, payload: WebhookPayload):
 
 
 @app.get("/webhooks/dead-letter", response_model=WebhookDeadLetterResponse, tags=["Webhooks"])
-async def get_dead_letter_queue(provider_id: Optional[str] = None):
-    """Get failed webhook deliveries for investigation."""
-    entries = webhook_monitor.get_dlq_entries(provider_id=provider_id)
+async def get_dead_letter_queue(
+    provider_id: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=1000, description="Maximum entries to return"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+):
+    """Get failed webhook deliveries for investigation.
+
+    Supports pagination with limit and offset parameters.
+    """
+    entries = webhook_monitor.get_dlq_entries(provider_id=provider_id, limit=limit, offset=offset)
     dlq_summary = webhook_monitor.get_dlq_summary()
 
     return WebhookDeadLetterResponse(
@@ -525,12 +553,23 @@ async def get_provider_scorecard(provider_name: str):
 
 
 @app.get("/providers/scorecards", response_model=ScorecardListResponse, tags=["Scorecard"])
-async def list_provider_scorecards():
-    """Get scorecards for all providers."""
+async def list_provider_scorecards(
+    limit: int = Query(50, ge=1, le=500, description="Maximum scorecards to return"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+):
+    """Get scorecards for all providers.
+
+    Supports pagination with limit and offset parameters.
+    """
     providers = registry.list_all()
+
+    # Apply pagination
+    total_providers = len(providers)
+    providers_paginated = providers[offset:offset + limit]
+
     scorecards = []
 
-    for provider in providers:
+    for provider in providers_paginated:
         snapshot = health_tracker.take_snapshot(provider.id)
         incident_count = len(incident_detector.get_incidents_for_provider(provider.id))
 
@@ -584,7 +623,9 @@ async def list_provider_scorecards():
 
     return ScorecardListResponse(
         timestamp=datetime.now(),
-        providers=scorecards
+        providers=scorecards,
+        total_providers=total_providers,
+        returned_count=len(scorecards),
     )
 
 

@@ -24,6 +24,11 @@ from typing import Optional
 import statistics
 import random
 import math
+from sqlalchemy.orm import Session
+from sqlalchemy import desc, and_
+import logging
+
+logger = logging.getLogger("api_health_tracker")
 
 
 # ---------------------------------------------------------------------------
@@ -148,11 +153,10 @@ class APIHealthTracker:
     in-memory storage.
     """
 
-    def __init__(self):
-        self._events: list[APICallEvent] = []
+    def __init__(self, session_factory: Optional[object] = None):
+        self.session_factory = session_factory
         self._circuit_configs: dict[str, CircuitBreakerConfig] = {}
         self._circuit_states: dict[str, CircuitBreakerState] = {}
-        self._snapshots: list[HealthSnapshot] = []
 
     # -- Configuration ------------------------------------------------------
 
@@ -172,7 +176,28 @@ class APIHealthTracker:
         Returns the current health status so the caller knows whether
         to continue sending traffic or activate a fallback.
         """
-        self._events.append(event)
+        # Persist to database
+        if self.session_factory:
+            try:
+                from db import APICallEventModel
+                session = self.session_factory()
+                db_event = APICallEventModel(
+                    provider_id=event.provider_id,
+                    endpoint=event.endpoint,
+                    method=event.method,
+                    timestamp=event.timestamp,
+                    response_status_code=event.response_status_code,
+                    latency_ms=event.latency_ms,
+                    success=event.success,
+                    error_category=event.error_category,
+                    retry_attempt=event.retry_attempt,
+                )
+                session.add(db_event)
+                session.commit()
+                session.close()
+            except Exception as e:
+                logger.error(f"Failed to persist API call: {e}")
+
         self._update_circuit_breaker(event)
 
         cb = self._circuit_states.get(event.provider_id)
@@ -234,16 +259,29 @@ class APIHealthTracker:
         self, provider_id: str, window_seconds: int
     ) -> float:
         """Calculate error rate over a time window."""
-        cutoff = datetime.now() - timedelta(seconds=window_seconds)
-        window_events = [
-            e for e in self._events
-            if e.provider_id == provider_id and e.timestamp >= cutoff
-        ]
-        if not window_events:
+        if not self.session_factory:
             return 0.0
 
-        failed = sum(1 for e in window_events if not e.success)
-        return (failed / len(window_events)) * 100
+        try:
+            from db import APICallEventModel
+            session = self.session_factory()
+            cutoff = datetime.now() - timedelta(seconds=window_seconds)
+            window_events = session.query(APICallEventModel).filter(
+                and_(
+                    APICallEventModel.provider_id == provider_id,
+                    APICallEventModel.timestamp >= cutoff
+                )
+            ).all()
+            session.close()
+
+            if not window_events:
+                return 0.0
+
+            failed = sum(1 for e in window_events if not e.success)
+            return (failed / len(window_events)) * 100
+        except Exception as e:
+            logger.error(f"Failed to calculate error rate: {e}")
+            return 0.0
 
     # -- Circuit Breaker Queries --------------------------------------------
 
@@ -309,14 +347,8 @@ class APIHealthTracker:
         Default window is 5 minutes (300 seconds). Short enough to catch
         acute issues, long enough to avoid noise from single requests.
         """
-        cutoff = datetime.now() - timedelta(seconds=window_seconds)
-        window_events = [
-            e for e in self._events
-            if e.provider_id == provider_id and e.timestamp >= cutoff
-        ]
-
-        if not window_events:
-            snapshot = HealthSnapshot(
+        if not self.session_factory:
+            return HealthSnapshot(
                 provider_id=provider_id,
                 timestamp=datetime.now(),
                 window_seconds=window_seconds,
@@ -330,83 +362,117 @@ class APIHealthTracker:
                 error_rate_pct=0,
                 errors_by_category={},
                 errors_by_status_code={},
-                circuit_state=self._circuit_states.get(
-                    provider_id, CircuitBreakerState()
-                ).state,
+                circuit_state=CircuitState.CLOSED,
                 health_status=HealthStatus.UNKNOWN,
                 requests_per_minute=0,
             )
-            self._snapshots.append(snapshot)
+
+        try:
+            from db import APICallEventModel
+            session = self.session_factory()
+            cutoff = datetime.now() - timedelta(seconds=window_seconds)
+            window_events = session.query(APICallEventModel).filter(
+                and_(
+                    APICallEventModel.provider_id == provider_id,
+                    APICallEventModel.timestamp >= cutoff
+                )
+            ).all()
+
+            if not window_events:
+                snapshot = HealthSnapshot(
+                    provider_id=provider_id,
+                    timestamp=datetime.now(),
+                    window_seconds=window_seconds,
+                    latency_p50_ms=0,
+                    latency_p95_ms=0,
+                    latency_p99_ms=0,
+                    latency_max_ms=0,
+                    total_requests=0,
+                    successful_requests=0,
+                    failed_requests=0,
+                    error_rate_pct=0,
+                    errors_by_category={},
+                    errors_by_status_code={},
+                    circuit_state=self._circuit_states.get(
+                        provider_id, CircuitBreakerState()
+                    ).state,
+                    health_status=HealthStatus.UNKNOWN,
+                    requests_per_minute=0,
+                )
+                session.close()
+                return snapshot
+
+            # Latency percentiles (from successful requests only)
+            latencies = sorted(
+                e.latency_ms for e in window_events if e.success
+            )
+
+            if latencies:
+                p50 = latencies[len(latencies) // 2]
+                p95 = latencies[int(len(latencies) * 0.95)]
+                p99 = latencies[int(len(latencies) * 0.99)]
+                max_lat = latencies[-1]
+            else:
+                p50 = p95 = p99 = max_lat = 0
+
+            # Error breakdown
+            failed = [e for e in window_events if not e.success]
+            errors_by_cat = defaultdict(int)
+            errors_by_code = defaultdict(int)
+            for e in failed:
+                if e.error_category:
+                    errors_by_cat[e.error_category] += 1
+                errors_by_code[e.response_status_code] += 1
+
+            error_rate = len(failed) / len(window_events) * 100
+
+            # Throughput
+            time_span = (
+                window_events[-1].timestamp - window_events[0].timestamp
+            ).total_seconds()
+            rpm = (
+                len(window_events) / (time_span / 60) if time_span > 0
+                else len(window_events)
+            )
+
+            # Health assessment
+            cb_state = self._circuit_states.get(
+                provider_id, CircuitBreakerState()
+            ).state
+
+            if cb_state == CircuitState.OPEN:
+                health = HealthStatus.UNHEALTHY
+            elif error_rate > 10 or p95 > 10000:
+                health = HealthStatus.DEGRADED
+            elif error_rate > 25:
+                health = HealthStatus.UNHEALTHY
+            else:
+                health = HealthStatus.HEALTHY
+
+            snapshot = HealthSnapshot(
+                provider_id=provider_id,
+                timestamp=datetime.now(),
+                window_seconds=window_seconds,
+                latency_p50_ms=round(p50, 1),
+                latency_p95_ms=round(p95, 1),
+                latency_p99_ms=round(p99, 1),
+                latency_max_ms=round(max_lat, 1),
+                total_requests=len(window_events),
+                successful_requests=len(window_events) - len(failed),
+                failed_requests=len(failed),
+                error_rate_pct=round(error_rate, 2),
+                errors_by_category=dict(errors_by_cat),
+                errors_by_status_code=dict(errors_by_code),
+                circuit_state=cb_state,
+                health_status=health,
+                requests_per_minute=round(rpm, 1),
+            )
+
+            session.close()
             return snapshot
-
-        # Latency percentiles (from successful requests only)
-        latencies = sorted(
-            e.latency_ms for e in window_events if e.success
-        )
-
-        if latencies:
-            p50 = latencies[len(latencies) // 2]
-            p95 = latencies[int(len(latencies) * 0.95)]
-            p99 = latencies[int(len(latencies) * 0.99)]
-            max_lat = latencies[-1]
-        else:
-            p50 = p95 = p99 = max_lat = 0
-
-        # Error breakdown
-        failed = [e for e in window_events if not e.success]
-        errors_by_cat = defaultdict(int)
-        errors_by_code = defaultdict(int)
-        for e in failed:
-            if e.error_category:
-                errors_by_cat[e.error_category] += 1
-            errors_by_code[e.response_status_code] += 1
-
-        error_rate = len(failed) / len(window_events) * 100
-
-        # Throughput
-        time_span = (
-            window_events[-1].timestamp - window_events[0].timestamp
-        ).total_seconds()
-        rpm = (
-            len(window_events) / (time_span / 60) if time_span > 0
-            else len(window_events)
-        )
-
-        # Health assessment
-        cb_state = self._circuit_states.get(
-            provider_id, CircuitBreakerState()
-        ).state
-
-        if cb_state == CircuitState.OPEN:
-            health = HealthStatus.UNHEALTHY
-        elif error_rate > 10 or p95 > 10000:
-            health = HealthStatus.DEGRADED
-        elif error_rate > 25:
-            health = HealthStatus.UNHEALTHY
-        else:
-            health = HealthStatus.HEALTHY
-
-        snapshot = HealthSnapshot(
-            provider_id=provider_id,
-            timestamp=datetime.now(),
-            window_seconds=window_seconds,
-            latency_p50_ms=round(p50, 1),
-            latency_p95_ms=round(p95, 1),
-            latency_p99_ms=round(p99, 1),
-            latency_max_ms=round(max_lat, 1),
-            total_requests=len(window_events),
-            successful_requests=len(window_events) - len(failed),
-            failed_requests=len(failed),
-            error_rate_pct=round(error_rate, 2),
-            errors_by_category=dict(errors_by_cat),
-            errors_by_status_code=dict(errors_by_code),
-            circuit_state=cb_state,
-            health_status=health,
-            requests_per_minute=round(rpm, 1),
-        )
-
-        self._snapshots.append(snapshot)
-        return snapshot
+        except Exception as e:
+            logger.error(f"Failed to take snapshot: {e}")
+            raise
 
     # -- Latency Analysis ---------------------------------------------------
 

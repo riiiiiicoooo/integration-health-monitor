@@ -270,9 +270,11 @@ class ProviderScorecard(BaseModel):
 
 
 class ScorecardListResponse(BaseModel):
-    """List of provider scorecards."""
+    """List of provider scorecards with pagination info."""
     timestamp: datetime
     providers: List[ProviderScorecard]
+    total_providers: int = Field(default=0, description="Total number of providers available")
+    returned_count: int = Field(default=0, description="Number of providers in this response")
 
 
 # ---------------------------------------------------------------------------
